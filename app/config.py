@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     openai_api_key: SecretStr | None = None
     openai_model: str = "gpt-4o-mini"
+    openai_embedding_model: str = "text-embedding-3-small"
     openai_timeout_seconds: float = 30.0
     max_agent_iterations: int = 2
 

@@ -9,6 +9,8 @@ from app.agents.portfolio_graph import run_llm_portfolio_workflow
 from app.config import settings
 from app.logging_config import configure_logging
 from app.models.portfolio import Portfolio
+from app.models.rag import RagAskRequest, RagAskResponse
+from app.services.rag_service import get_default_rag_service
 from app.services.risk_engine import assess_portfolio_risk
 
 
@@ -97,4 +99,36 @@ async def run_agent(request: AgentRunRequest):
             status="failed",
             error="An error occurred while executing the agent workflow.",
         )
+
+
+@app.post("/rag/ask", response_model=RagAskResponse)
+async def ask_rag(request: RagAskRequest):
+    """Answer research and policy questions grounded in synthetic document evidence."""
+    rag_service = get_default_rag_service()
+    try:
+        result = rag_service.answer_question(
+            question=request.question,
+            top_k=request.top_k,
+        )
+
+        if result.status == "failed":
+            logger.error("rag_ask_failed: %s", result.error)
+            raise HTTPException(
+                status_code=503,
+                detail=result.error or "RAG service temporarily unavailable.",
+            )
+
+        return RagAskResponse(
+            status=result.status,
+            answer=result.answer,
+            sources=result.sources,
+            error=result.error,
+        )
+    except ValueError as exc:
+        logger.warning("rag_ask_invalid_request: %s", exc)
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        ) from exc
+
 
