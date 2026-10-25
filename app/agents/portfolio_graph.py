@@ -13,6 +13,12 @@ from langchain_core.messages import (
 from langchain_openai import ChatOpenAI
 
 from app.config import settings
+from app.observability import resolve_model_name, track_llm_operation
+from app.services.resilience import (
+    WorkflowDeadline,
+    WorkflowDeadlineExceededError,
+    execute_with_retry,
+)
 from app.tools.portfolio_tools import (
     APPROVED_LANGCHAIN_TOOLS,
     AVAILABLE_TOOLS,
@@ -103,13 +109,18 @@ class LLMPortfolioState(TypedDict, total=False):
     error: str | None
     iteration_count: int
     max_iterations: int
+    deadline: WorkflowDeadline | None
 
 
 def sanitize_provider_error(exc: Exception) -> str:
     """Safely describe provider errors without leaking API keys or secrets."""
+    if isinstance(exc, WorkflowDeadlineExceededError):
+        return "Workflow execution deadline exceeded."
     exc_type = type(exc).__name__.lower()
     exc_msg = str(exc).lower()
 
+    if "deadline" in exc_msg or "deadline" in exc_type:
+        return "Workflow execution deadline exceeded."
     if "authentication" in exc_type or "auth" in exc_type or "authentication" in exc_msg or "auth" in exc_msg:
         return "Authentication failure with model provider."
     if "timeout" in exc_type or "timed out" in exc_msg:
@@ -125,6 +136,16 @@ def make_call_model_node(llm_client: Any = None):
     def call_model_node(state: LLMPortfolioState) -> dict[str, Any]:
         iteration_count = state.get("iteration_count", 0)
         max_iterations = state.get("max_iterations", settings.max_agent_iterations)
+        deadline = state.get("deadline")
+
+        if deadline is not None and deadline.is_expired():
+            return {
+                "status": "failed",
+                "error": "LLM provider error: Workflow execution deadline exceeded.",
+                "iteration_count": iteration_count + 1,
+                "assessment_result": None,
+                "final_response": None,
+            }
 
         if iteration_count >= max_iterations:
             return {
@@ -145,19 +166,32 @@ def make_call_model_node(llm_client: Any = None):
                 api_key=settings.openai_api_key.get_secret_value(),
                 model=settings.openai_model,
                 timeout=settings.openai_timeout_seconds,
+                max_retries=0,
             ).bind_tools(APPROVED_LANGCHAIN_TOOLS)
 
+        model_name = resolve_model_name(
+            client=client,
+            fallback=settings.openai_model,
+        )
+
         try:
-            response = client.invoke(state.get("messages", []))
-            return {
-                "messages": state.get("messages", []) + [response],
-                "iteration_count": iteration_count + 1,
-            }
+            with track_llm_operation(operation="portfolio_agent_model", model=model_name) as tracker:
+                response = execute_with_retry(
+                    lambda: client.invoke(state.get("messages", [])),
+                    deadline=deadline,
+                )
+                tracker.record_success(response=response, outcome="success")
+                return {
+                    "messages": state.get("messages", []) + [response],
+                    "iteration_count": iteration_count + 1,
+                }
         except Exception as exc:
+            is_deadline = isinstance(exc, WorkflowDeadlineExceededError) or "deadline" in str(exc).lower()
             return {
                 "status": "failed",
                 "error": f"LLM provider error: {sanitize_provider_error(exc)}",
                 "iteration_count": iteration_count + 1,
+                **({"assessment_result": None, "final_response": None} if is_deadline else {}),
             }
 
     return call_model_node
@@ -183,6 +217,15 @@ def route_after_model(state: LLMPortfolioState) -> str:
 
 def execute_tool_node(state: LLMPortfolioState) -> dict[str, Any]:
     """Execute the model-requested tool using strict allowlist and validation."""
+    deadline = state.get("deadline")
+    if deadline is not None and deadline.is_expired():
+        return {
+            "status": "failed",
+            "error": "Workflow execution deadline exceeded.",
+            "assessment_result": None,
+            "final_response": None,
+        }
+
     messages = state.get("messages", [])
     last_message = messages[-1]
     tool_calls = getattr(last_message, "tool_calls", [])
@@ -286,6 +329,8 @@ def run_llm_portfolio_workflow(
     llm_client: Any = None,
     max_iterations: int | None = None,
     system_prompt: str | None = None,
+    workflow_timeout_seconds: float | None = None,
+    deadline: WorkflowDeadline | None = None,
 ) -> LLMPortfolioState:
     """Execute the LLM portfolio workflow synchronously."""
     graph = build_llm_portfolio_graph(llm_client=llm_client)
@@ -294,6 +339,15 @@ def run_llm_portfolio_workflow(
     if system_prompt:
         messages.append(SystemMessage(content=system_prompt))
     messages.append(HumanMessage(content=user_query))
+
+    active_deadline = deadline
+    if active_deadline is None:
+        timeout = (
+            workflow_timeout_seconds
+            if workflow_timeout_seconds is not None
+            else settings.workflow_timeout_seconds
+        )
+        active_deadline = WorkflowDeadline(timeout_seconds=timeout)
 
     initial_state: LLMPortfolioState = {
         "user_query": user_query,
@@ -305,6 +359,7 @@ def run_llm_portfolio_workflow(
         "error": None,
         "iteration_count": 0,
         "max_iterations": limit,
+        "deadline": active_deadline,
     }
     return graph.invoke(initial_state)
 

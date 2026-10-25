@@ -1,5 +1,6 @@
 # pyrefly: ignore[missing-import]
 import logging
+import time
 from typing import Any, Sequence
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -8,7 +9,17 @@ from app.config import settings
 from app.models.document import ResearchDocument
 from app.models.rag import SourceReference
 from app.models.retrieval import RetrievalResult
+from app.observability import (
+    record_insufficient_evidence_without_llm,
+    resolve_model_name,
+    track_llm_operation,
+)
 from app.services.document_ingestion import ingest_documents
+from app.services.resilience import (
+    WorkflowDeadline,
+    WorkflowDeadlineExceededError,
+    execute_with_retry,
+)
 from app.services.retrieval_service import (
     EmbeddingClient,
     EmbeddingProviderError,
@@ -36,6 +47,8 @@ def sanitize_provider_error(exc: Exception) -> str:
     exc_type = type(exc).__name__.lower()
     exc_msg = str(exc).lower()
 
+    if isinstance(exc, WorkflowDeadlineExceededError) or "deadline" in exc_type or "deadline" in exc_msg or "budget" in exc_msg:
+        return "Workflow execution deadline exceeded."
     if "authentication" in exc_type or "auth" in exc_type or "authentication" in exc_msg or "auth" in exc_msg:
         return "Authentication failure with model provider."
     if "timeout" in exc_type or "timed out" in exc_msg:
@@ -139,6 +152,7 @@ class RagService:
             api_key=settings.openai_api_key.get_secret_value(),
             model=settings.openai_model,
             timeout=settings.openai_timeout_seconds,
+            max_retries=0,
         )
 
     def _format_prompt_context(
@@ -173,12 +187,14 @@ class RagService:
         self,
         question: str,
         top_k: int | None = None,
+        workflow_timeout_seconds: float | None = None,
     ) -> RagAnswerResult:
         """Retrieve relevant synthetic evidence and generate a grounded answer.
 
         Args:
             question: The user research/policy query.
             top_k: Number of chunks to retrieve (defaults to default_top_k).
+            workflow_timeout_seconds: Optional overall execution budget for the workflow run.
 
         Returns:
             RagAnswerResult containing status, answer, source references, and optional error.
@@ -186,12 +202,16 @@ class RagService:
         if not question or not question.strip():
             raise ValueError("Question cannot be empty or whitespace-only.")
 
+        start_time = time.perf_counter()
+        deadline = WorkflowDeadline(timeout_seconds=workflow_timeout_seconds)
+
         k = top_k if top_k is not None else self.default_top_k
         if not isinstance(k, int) or k <= 0:
             raise ValueError(f"top_k must be a positive integer, got {k}.")
 
         # 1. Initialize in-memory index once
         try:
+            deadline.check_or_raise()
             self._ensure_initialized()
         except Exception as exc:
             logger.error("rag_index_initialization_failed: %s", exc)
@@ -204,6 +224,7 @@ class RagService:
 
         # 2. Retrieve relevant evidence
         try:
+            deadline.check_or_raise()
             raw_results = self.retrieval_service.retrieve(query=question.strip(), top_k=k)
         except EmbeddingProviderError as exc:
             logger.error("rag_retrieval_failed: %s", exc)
@@ -219,7 +240,7 @@ class RagService:
                 status="failed",
                 answer="",
                 sources=[],
-                error="Retrieval service encountered an error.",
+                error=sanitize_provider_error(exc),
             )
 
         # 3. Filter by minimum relevance threshold
@@ -230,6 +251,11 @@ class RagService:
 
         # 4. If no relevant evidence was found, return controlled response without calling LLM
         if not relevant_results:
+            duration_ms = (time.perf_counter() - start_time) * 1000.0
+            record_insufficient_evidence_without_llm(
+                operation="rag_answer",
+                duration_ms=duration_ms,
+            )
             logger.info("rag_insufficient_evidence", extra={"question": question[:50]})
             return RagAnswerResult(
                 status="insufficient_evidence",
@@ -256,38 +282,51 @@ class RagService:
             results=relevant_results,
         )
 
+        model_name = resolve_model_name(
+            client=self.llm_client,
+            fallback=settings.openai_model,
+        )
+
         try:
-            client = self._get_llm_client()
-            response = client.invoke(messages)
-            answer_text = response.content if hasattr(response, "content") else str(response)
-            cleaned_answer = answer_text.strip()
+            with track_llm_operation(operation="rag_answer", model=model_name) as tracker:
+                deadline.check_or_raise()
+                client = self._get_llm_client()
+                response = execute_with_retry(
+                    lambda: client.invoke(messages),
+                    deadline=deadline,
+                )
+                answer_text = response.content if hasattr(response, "content") else str(response)
+                cleaned_answer = answer_text.strip()
 
-            insufficient_phrases = (
-                "do not contain sufficient evidence",
-                "does not contain sufficient evidence",
-                "insufficient evidence to answer",
-                "insufficient evidence",
-                "insufficient information to answer",
-                "no sufficient evidence",
-            )
-            is_insufficient = any(p in cleaned_answer.lower() for p in insufficient_phrases)
+                insufficient_phrases = (
+                    "do not contain sufficient evidence",
+                    "does not contain sufficient evidence",
+                    "insufficient evidence to answer",
+                    "insufficient evidence",
+                    "insufficient information to answer",
+                    "no sufficient evidence",
+                )
+                is_insufficient = any(p in cleaned_answer.lower() for p in insufficient_phrases)
 
-            status = "insufficient_evidence" if is_insufficient else "answered"
-            final_sources = [] if is_insufficient else sources
+                status = "insufficient_evidence" if is_insufficient else "answered"
+                final_sources = [] if is_insufficient else sources
 
-            logger.info(
-                "rag_answer_generated",
-                extra={
-                    "status": status,
-                    "sources_count": len(final_sources),
-                },
-            )
+                outcome = "insufficient_evidence" if is_insufficient else "success"
+                tracker.record_success(response=response, outcome=outcome)
 
-            return RagAnswerResult(
-                status=status,
-                answer=cleaned_answer,
-                sources=final_sources,
-            )
+                logger.info(
+                    "rag_answer_generated",
+                    extra={
+                        "status": status,
+                        "sources_count": len(final_sources),
+                    },
+                )
+
+                return RagAnswerResult(
+                    status=status,
+                    answer=cleaned_answer,
+                    sources=final_sources,
+                )
         except Exception as exc:
             logger.error("rag_llm_generation_failed: %s", exc)
             return RagAnswerResult(
