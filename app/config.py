@@ -12,6 +12,44 @@ class Settings(BaseSettings):
     openai_timeout_seconds: float = 30.0
     max_agent_iterations: int = 2
 
+    # Security & Resource Boundary Limits
+    max_query_length: int = Field(
+        default=2000,
+        ge=1,
+        le=50000,
+        description="Maximum allowed character length for user questions/queries to prevent DoS/overflow.",
+    )
+    max_retrieval_k: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="Maximum allowed top_k chunks for retrieval to bound context and compute.",
+    )
+    min_relevance_score: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=1.0,
+        description="Default minimum similarity relevance score threshold for RAG evidence.",
+    )
+    max_holdings_count: int = Field(
+        default=500,
+        ge=1,
+        le=5000,
+        description="Maximum number of holdings permitted in a single portfolio payload.",
+    )
+    max_portfolio_id_length: int = Field(
+        default=64,
+        ge=1,
+        le=256,
+        description="Maximum allowed length for a portfolio ID identifier string.",
+    )
+    max_symbol_length: int = Field(
+        default=10,
+        ge=1,
+        le=32,
+        description="Maximum allowed length for a ticker symbol.",
+    )
+
     # Resilience & Retry Configuration
     # Semantics: max_retries is the maximum number of retry attempts following an initial failure.
     # Total potential attempts = 1 + max_retries (e.g. max_retries=2 means at most 3 total attempts).

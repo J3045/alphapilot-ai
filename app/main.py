@@ -8,6 +8,7 @@ from pydantic import BaseModel, ValidationError
 from app.agents.portfolio_graph import run_llm_portfolio_workflow
 from app.config import settings
 from app.logging_config import configure_logging
+from app.models.agent import AgentRunRequest, AgentRunResponse
 from app.models.portfolio import Portfolio
 from app.models.rag import RagAskRequest, RagAskResponse
 from app.services.rag_service import get_default_rag_service
@@ -58,16 +59,6 @@ async def assess_portfolio(portfolio: Portfolio):
         ) from exc
 
 
-class AgentRunRequest(BaseModel):
-    query: str
-    portfolio: Portfolio | None = None
-
-
-class AgentRunResponse(BaseModel):
-    status: str
-    assessment_result: dict | None = None
-    final_response: str | None = None
-    error: str | None = None
 
 
 @app.post("/agent/run", response_model=AgentRunResponse)

@@ -56,7 +56,8 @@ class RagAskRequest(BaseModel):
     question: str = Field(
         ...,
         min_length=1,
-        description="Non-empty research or policy question to answer.",
+        max_length=2000,
+        description="Non-empty research or policy question to answer (max 2000 characters).",
     )
     top_k: int = Field(
         default=3,
@@ -71,6 +72,8 @@ class RagAskRequest(BaseModel):
         stripped = value.strip()
         if not stripped:
             raise ValueError("question cannot be empty or whitespace-only.")
+        if len(stripped) > 2000:
+            raise ValueError("question cannot exceed 2000 characters.")
         return stripped
 
 

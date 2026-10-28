@@ -1,13 +1,48 @@
 # pyrefly: ignore[missing-import]
-from pydantic import BaseModel, Field, ConfigDict
+import math
+import re
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Holding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    symbol: str = Field(min_length=1, max_length=10)
-    quantity: float = Field(gt=0)
-    price: float = Field(gt=0)
+    symbol: str = Field(
+        min_length=1,
+        max_length=10,
+        description="Ticker symbol for the asset (1-10 uppercase alphanumeric characters).",
+    )
+    quantity: float = Field(
+        gt=0,
+        le=1e9,
+        allow_inf_nan=False,
+        description="Positive finite quantity of shares or units held.",
+    )
+    price: float = Field(
+        gt=0,
+        le=1e9,
+        allow_inf_nan=False,
+        description="Positive finite unit price in quote currency.",
+    )
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_symbol(cls, value: str) -> str:
+        stripped = value.strip().upper()
+        if not stripped:
+            raise ValueError("symbol cannot be empty or whitespace-only.")
+        if not re.match(r"^[A-Z0-9.\-_]{1,10}$", stripped):
+            raise ValueError(
+                f"Invalid symbol format: '{value}'. Must be 1-10 alphanumeric characters."
+            )
+        return stripped
+
+    @field_validator("quantity", "price")
+    @classmethod
+    def validate_finite_number(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("Financial numeric values must be finite numbers (not NaN or Inf).")
+        return value
 
     @property
     def market_value(self) -> float:
@@ -17,9 +52,37 @@ class Holding(BaseModel):
 class Portfolio(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    portfolio_id: str = Field(min_length=1)
-    cash: float = Field(ge=0)
-    holdings: list[Holding]
+    portfolio_id: str = Field(
+        min_length=1,
+        max_length=64,
+        description="Unique identifier for the investment portfolio.",
+    )
+    cash: float = Field(
+        ge=0,
+        le=1e12,
+        allow_inf_nan=False,
+        description="Available uninvested cash balance (finite, non-negative).",
+    )
+    holdings: list[Holding] = Field(
+        default_factory=list,
+        max_length=500,
+        description="List of individual asset holdings within the portfolio (max 500).",
+    )
+
+    @field_validator("portfolio_id")
+    @classmethod
+    def validate_portfolio_id(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("portfolio_id cannot be empty or whitespace-only.")
+        return stripped
+
+    @field_validator("cash")
+    @classmethod
+    def validate_finite_cash(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("Cash value must be a finite non-negative number (not NaN or Inf).")
+        return value
 
     @property
     def holdings_value(self) -> float:

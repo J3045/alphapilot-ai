@@ -263,10 +263,24 @@ def execute_tool_node(state: LLMPortfolioState) -> dict[str, Any]:
             "status": "completed",
             "error": None,
         }
+    except PermissionError as exc:
+        return {
+            "status": "failed",
+            "error": f"Controlled tool execution rejected: {str(exc)}",
+            "portfolio_input": tool_args,
+            "assessment_result": None,
+        }
     except (ValidationError, ValueError) as exc:
         return {
             "status": "failed",
             "error": f"Controlled tool execution rejected: malformed tool arguments: {str(exc)}",
+            "portfolio_input": tool_args,
+            "assessment_result": None,
+        }
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "error": f"Controlled tool execution rejected: tool failed ({type(exc).__name__}).",
             "portfolio_input": tool_args,
             "assessment_result": None,
         }
@@ -333,6 +347,14 @@ def run_llm_portfolio_workflow(
     deadline: WorkflowDeadline | None = None,
 ) -> LLMPortfolioState:
     """Execute the LLM portfolio workflow synchronously."""
+    if not user_query or not user_query.strip():
+        raise ValueError("user_query cannot be empty or whitespace-only.")
+    if len(user_query.strip()) > settings.max_query_length:
+        raise ValueError(
+            f"user_query character length ({len(user_query.strip())}) exceeds "
+            f"maximum permitted limit ({settings.max_query_length})."
+        )
+
     graph = build_llm_portfolio_graph(llm_client=llm_client)
     limit = max_iterations if max_iterations is not None else settings.max_agent_iterations
     messages: list[BaseMessage] = []
