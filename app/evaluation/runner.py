@@ -61,6 +61,7 @@ def create_offline_rag_service(top_k: int = 3) -> RagService:
         embedding_client=fake_embedder,
         min_relevance_score=0.15,
         default_top_k=top_k,
+        storage_backend="in_memory",
     )
 
 

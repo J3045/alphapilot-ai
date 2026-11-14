@@ -1,0 +1,19 @@
+ app/agents/portfolio_graph.py                      |  22 [32m++[m
+ app/config.py                                      |  38 [32m++[m
+ app/logging_config.py                              |  61 [32m++[m[31m-[m
+ app/main.py                                        |  11 [32m+[m[31m-[m
+ app/models/__init__.py                             |   4 [32m+[m[31m-[m
+ app/models/agent.py                                |  54 [32m+++[m
+ app/models/portfolio.py                            |  77 [32m+++[m[31m-[m
+ app/models/rag.py                                  |   5 [32m+[m[31m-[m
+ app/services/rag_service.py                        |  13 [32m+[m[31m-[m
+ app/tools/portfolio_tools.py                       |  85 [32m++++[m[31m-[m
+ ...001-deterministic-financial-logic-separation.md |  26 [32m++[m
+ docs/adr/002-langgraph-agent-orchestration.md      |  26 [32m++[m
+ docs/adr/003-rag-modular-pipeline-separation.md    |  29 [32m++[m
+ .../004-in-memory-vector-index-mvp-tradeoffs.md    |  30 [32m++[m
+ ...5-coordinated-retries-and-workflow-deadlines.md |  26 [32m++[m
+ ...rivacy-safe-observability-and-cost-telemetry.md |  28 [32m++[m
+ docs/architecture.md                               | 269 [32m++++++++++++++[m
+ tests/test_security.py                             | 409 [32m+++++++++++++++++++++[m
+ 18 files changed, 1176 insertions(+), 37 deletions(-)

@@ -32,19 +32,34 @@ _STANDARD_LOG_RECORD_ATTRS = {
 }
 
 _SENSITIVE_KEY_PATTERNS = re.compile(
-    r"(api_?key|secret|access_token|refresh_token|session_token|auth_token|bearer_token|jwt|password|authorization|credential)",
+    r"(api_?key|secret|access_token|refresh_token|session_token|auth_token|bearer_token|request_token|authorization_code|checksum|encryption_key|encrypted_access_token|jwt|password|authorization|credential|database_url|db_url|dsn|connection_string|oauth_state|state_token|client_binding|set_cookie|cookie|alphapilot_oauth_bind|broker_account_id)",
     re.IGNORECASE,
 )
 _API_KEY_REGEX = re.compile(r"sk-[a-zA-Z0-9_\-]{15,}")
 _BEARER_TOKEN_REGEX = re.compile(r"Bearer\s+[a-zA-Z0-9_\-\.]{15,}", re.IGNORECASE)
+_KITE_TOKEN_REGEX = re.compile(r"(Authorization\s*:\s*token\s+|token\s+)[A-Za-z0-9_\-]+:[A-Za-z0-9_\-]+", re.IGNORECASE)
+_QUERY_SECRET_REGEX = re.compile(
+    r"(?<![a-zA-Z0-9_])((?:request_token|access_token|api_secret|checksum|oauth_state|state|alphapilot_oauth_bind|token)=)([^&\s'\";]+)",
+    re.IGNORECASE,
+)
+_COOKIE_HEADER_REGEX = re.compile(r"((?:Set-)?Cookie\s*:\s*)([^\r\n]+)", re.IGNORECASE)
+_DB_URL_PASSWORD_REGEX = re.compile(
+    r"([a-zA-Z][a-zA-Z0-9+.\-]*://[^:/\s@]+:)([^@\s]+)(@)"
+)
+_DSN_PASSWORD_REGEX = re.compile(r"(password\s*=\s*)([^\s'\"&;]+)", re.IGNORECASE)
 
 
 def redact_sensitive_text(text: str) -> str:
-    """Scrub sensitive API keys, tokens, and authorization headers from text."""
+    """Scrub sensitive API keys, tokens, OAuth state/cookies, database credentials, and authorization headers from text."""
     if not isinstance(text, str):
         return text
     cleaned = _API_KEY_REGEX.sub("sk-[REDACTED]", text)
     cleaned = _BEARER_TOKEN_REGEX.sub("Bearer [REDACTED]", cleaned)
+    cleaned = _KITE_TOKEN_REGEX.sub(r"\1[REDACTED]", cleaned)
+    cleaned = _QUERY_SECRET_REGEX.sub(r"\1[REDACTED]", cleaned)
+    cleaned = _COOKIE_HEADER_REGEX.sub(r"\1[REDACTED]", cleaned)
+    cleaned = _DB_URL_PASSWORD_REGEX.sub(r"\1[REDACTED]\3", cleaned)
+    cleaned = _DSN_PASSWORD_REGEX.sub(r"\1[REDACTED]", cleaned)
     return cleaned
 
 

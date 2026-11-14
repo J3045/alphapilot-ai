@@ -4,13 +4,28 @@ import re
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+TICKER_SYMBOL_PATTERN = re.compile(
+    r"^[A-Z0-9][A-Z0-9.\-_]{0,31}(?:&[A-Z0-9.\-_]{1,31})*$"
+)
+
+
+def is_valid_ticker_symbol(symbol: str, max_length: int = 32) -> bool:
+    """Validate an uppercase ticker symbol supporting legitimate Indian/global symbols (e.g., M&M, NIFTY100BEES)."""
+    stripped = symbol.strip().upper()
+    if not stripped or len(stripped) > max_length:
+        return False
+    return bool(TICKER_SYMBOL_PATTERN.match(stripped))
+
+
 class Holding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     symbol: str = Field(
         min_length=1,
-        max_length=10,
-        description="Ticker symbol for the asset (1-10 uppercase alphanumeric characters).",
+        max_length=32,
+        description=(
+            "Ticker symbol for the asset (1-32 uppercase ticker characters, supporting ., -, _, &)."
+        ),
     )
     quantity: float = Field(
         gt=0,
@@ -24,6 +39,13 @@ class Holding(BaseModel):
         allow_inf_nan=False,
         description="Positive finite unit price in quote currency.",
     )
+    instrument_id: str | None = Field(
+        default=None,
+        max_length=128,
+        description=(
+            "Optional canonical instrument identity (e.g., 'isin:INE002A01018') for aggregating duplicate exchange listings."
+        ),
+    )
 
     @field_validator("symbol")
     @classmethod
@@ -31,11 +53,19 @@ class Holding(BaseModel):
         stripped = value.strip().upper()
         if not stripped:
             raise ValueError("symbol cannot be empty or whitespace-only.")
-        if not re.match(r"^[A-Z0-9.\-_]{1,10}$", stripped):
+        if not is_valid_ticker_symbol(stripped, max_length=32):
             raise ValueError(
-                f"Invalid symbol format: '{value}'. Must be 1-10 alphanumeric characters."
+                f"Invalid symbol format: '{value}'. Must be 1-32 valid ticker characters."
             )
         return stripped
+
+    @field_validator("instrument_id")
+    @classmethod
+    def validate_instrument_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
 
     @field_validator("quantity", "price")
     @classmethod

@@ -13,6 +13,7 @@ Tracks:
 
 import json
 import logging
+import threading
 import time
 from dataclasses import asdict, dataclass
 from typing import Any, Literal, Sequence
@@ -70,6 +71,7 @@ class PricingRegistry:
     """
 
     def __init__(self, rates: dict[str, ModelPricing] | None = None) -> None:
+        self._lock = threading.RLock()
         self._rates: dict[str, ModelPricing] = {}
         if rates:
             for model_name, pricing in rates.items():
@@ -79,13 +81,15 @@ class PricingRegistry:
         """Register or override pricing rates for a model identifier."""
         if not model or not model.strip():
             raise ValueError("Model name must be a non-empty string.")
-        self._rates[model.strip().lower()] = pricing
+        with self._lock:
+            self._rates[model.strip().lower()] = pricing
 
     def get(self, model: str | None) -> ModelPricing | None:
         """Retrieve configured pricing for a model if explicitly configured."""
         if not model or not isinstance(model, str):
             return None
-        return self._rates.get(model.strip().lower())
+        with self._lock:
+            return self._rates.get(model.strip().lower())
 
     def calculate_cost(
         self,
@@ -184,22 +188,26 @@ class TelemetryEvent:
 # In-Memory Event Sink (for testing and verification)
 # ---------------------------------------------------------------------------
 
+_EVENTS_LOCK = threading.Lock()
 _RECORDED_EVENTS: list[TelemetryEvent] = []
 
 
 def get_recorded_events() -> list[TelemetryEvent]:
     """Retrieve in-memory copy of recorded telemetry events."""
-    return list(_RECORDED_EVENTS)
+    with _EVENTS_LOCK:
+        return list(_RECORDED_EVENTS)
 
 
 def clear_recorded_events() -> None:
     """Clear recorded telemetry events."""
-    _RECORDED_EVENTS.clear()
+    with _EVENTS_LOCK:
+        _RECORDED_EVENTS.clear()
 
 
 def emit_telemetry_event(event: TelemetryEvent) -> None:
     """Record event in memory and emit a structured JSON log entry."""
-    _RECORDED_EVENTS.append(event)
+    with _EVENTS_LOCK:
+        _RECORDED_EVENTS.append(event)
     payload = event.to_dict()
     logger.info("llm_telemetry_event", extra={"telemetry": payload})
 
@@ -297,6 +305,8 @@ def categorize_error(exc: Exception | None) -> str | None:
 
     if "timeout" in exc_type or "timed out" in exc_msg or "timeout" in exc_msg or "deadline" in exc_type or "deadline" in exc_msg:
         return "timeout"
+    if "concurrencylimit" in exc_type or "capacity saturated" in exc_msg or "backpressure" in exc_type:
+        return "backpressure"
     if "auth" in exc_type or "auth" in exc_msg or "unauthorized" in exc_msg or "api_key" in exc_msg or "401" in exc_msg:
         return "authentication"
     if "ratelimit" in exc_type or "rate_limit" in exc_msg or "429" in exc_msg:

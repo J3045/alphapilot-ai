@@ -13,12 +13,19 @@ def assess_portfolio_risk(
 
     cash_pct = portfolio.cash / total_value * 100
 
+    aggregated_values: dict[str, float] = {}
+    display_symbols: dict[str, str] = {}
+    for holding in portfolio.holdings:
+        identity_key = holding.instrument_id or f"symbol:{holding.symbol}"
+        aggregated_values[identity_key] = aggregated_values.get(identity_key, 0.0) + holding.market_value
+        display_symbols.setdefault(identity_key, holding.symbol)
+
     concentrations = [
         {
-            "symbol": holding.symbol,
-            "weight_pct": holding.market_value / total_value * 100,
+            "symbol": display_symbols[identity_key],
+            "weight_pct": market_value / total_value * 100,
         }
-        for holding in portfolio.holdings
+        for identity_key, market_value in aggregated_values.items()
     ]
 
     violations = []

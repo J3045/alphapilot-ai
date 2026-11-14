@@ -1,17 +1,31 @@
 
-import logging
+import asyncio
 from contextlib import asynccontextmanager
+import logging
+import os
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, ValidationError
 
-from app.agents.portfolio_graph import run_llm_portfolio_workflow
+from app.agents.portfolio_graph import run_llm_portfolio_workflow_async
+from app.api.auth_routes import router as auth_router
+from app.api.broker_routes import router as broker_router
+from app.api.portfolio_routes import router as portfolio_router
 from app.config import settings
+from app.db.session import (
+    dispose_default_database_manager,
+    get_default_database_manager,
+    has_database_configuration,
+)
 from app.logging_config import configure_logging
 from app.models.agent import AgentRunRequest, AgentRunResponse
 from app.models.portfolio import Portfolio
 from app.models.rag import RagAskRequest, RagAskResponse
-from app.services.rag_service import get_default_rag_service
+from app.services.rag_service import get_default_rag_service, reset_default_rag_service
+from app.services.resilience import (
+    get_default_llm_limiter,
+    reset_default_llm_limiter,
+    supports_async_method,
+)
 from app.services.risk_engine import assess_portfolio_risk
 
 
@@ -21,9 +35,39 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("application_starting")
-    yield
-    logger.info("application_stopping")
+    rag_service = get_default_rag_service()
+    llm_limiter = get_default_llm_limiter()
+    app.state.rag_service = rag_service
+    app.state.llm_limiter = llm_limiter
+    if has_database_configuration():
+        app.state.db_manager = get_default_database_manager()
+
+    logger.info(
+        "application_starting",
+        extra={
+            "pid": os.getpid(),
+            "max_concurrent_llm_requests": settings.max_concurrent_llm_requests,
+            "rag_prewarm_on_startup": settings.rag_prewarm_on_startup,
+            "rag_storage_backend": settings.rag_storage_backend,
+            "database_configured": has_database_configuration(),
+        },
+    )
+
+    if settings.rag_prewarm_on_startup:
+        await rag_service._ensure_initialized_async()
+
+    try:
+        yield
+    finally:
+        if supports_async_method(rag_service, "aclose"):
+            await rag_service.aclose()
+        registry = getattr(app.state, "broker_registry", None)
+        if registry is not None and supports_async_method(registry, "aclose_all"):
+            await registry.aclose_all()
+        await dispose_default_database_manager()
+        reset_default_rag_service()
+        reset_default_llm_limiter()
+        logger.info("application_stopping", extra={"pid": os.getpid()})
 
 
 app = FastAPI(
@@ -31,6 +75,9 @@ app = FastAPI(
     version="0.2.0",
     lifespan=lifespan,
 )
+app.include_router(auth_router)
+app.include_router(broker_router)
+app.include_router(portfolio_router)
 
 
 @app.get("/health")
@@ -71,7 +118,7 @@ async def run_agent(request: AgentRunRequest):
                 f"Portfolio Context:\n{request.portfolio.model_dump_json(indent=2)}"
             )
 
-        state = run_llm_portfolio_workflow(user_query=query)
+        state = await run_llm_portfolio_workflow_async(user_query=query)
 
         logger.info(
             "agent_workflow_executed",
@@ -97,10 +144,17 @@ async def ask_rag(request: RagAskRequest):
     """Answer research and policy questions grounded in synthetic document evidence."""
     rag_service = get_default_rag_service()
     try:
-        result = rag_service.answer_question(
-            question=request.question,
-            top_k=request.top_k,
-        )
+        if supports_async_method(rag_service, "answer_question_async"):
+            result = await rag_service.answer_question_async(
+                question=request.question,
+                top_k=request.top_k,
+            )
+        else:
+            result = await asyncio.to_thread(
+                rag_service.answer_question,
+                question=request.question,
+                top_k=request.top_k,
+            )
 
         if result.status == "failed":
             logger.error("rag_ask_failed: %s", result.error)

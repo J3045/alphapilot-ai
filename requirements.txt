@@ -7,3 +7,8 @@ pytest
 httpx
 langgraph
 langchain-openai
+sqlalchemy[asyncio]>=2.0
+asyncpg
+pgvector
+alembic
+cryptography
